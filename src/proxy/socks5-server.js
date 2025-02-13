@@ -62,26 +62,21 @@ export class Socks5Server {
     const requestId = crypto.randomBytes(16).toString('hex');
     const logger = createRequestLogger(requestId);
     
+    logger.debug('New connection from ' + clientSocket.remoteAddress);
+    
     this.connections.add(clientSocket);
     this.optimizeSocket(clientSocket);
 
-    clientSocket.on('error', (err) => {
-      logger.error('Client socket error', { error: err.message });
-      clientSocket.destroy();
-    });
-
-    clientSocket.on('close', () => {
-      this.connections.delete(clientSocket);
-      logger.debug('Client disconnected');
-    });
-
     try {
-      await this.handleInitialGreeting(clientSocket, logger);
-      await this.handleAuthentication(clientSocket, logger);
-      await this.handleRequest(clientSocket, logger);
+        const initialData = await this.readFromSocket(clientSocket, 2);
+        logger.debug('Initial handshake received', { data: initialData });
+        
+        await this.handleInitialGreeting(clientSocket, logger);
+        await this.handleAuthentication(clientSocket, logger);
+        await this.handleRequest(clientSocket, logger);
     } catch (error) {
-      logger.error('Connection handling error', { error: error.message });
-      clientSocket.destroy();
+        logger.error('Connection handling error', { error: error.message });
+        clientSocket.destroy();
     }
   }
 
@@ -120,7 +115,7 @@ export class Socks5Server {
 
     const usernameLength = authHeader[1];
     const username = await this.readFromSocket(socket, usernameLength);
-    
+
     const passwordLengthBuf = await this.readFromSocket(socket, 1);
     const passwordLength = passwordLengthBuf[0];
     const password = await this.readFromSocket(socket, passwordLength);
@@ -204,16 +199,17 @@ export class Socks5Server {
   }
 
   setupPipe(clientSocket, targetSocket, logger) {
-    clientSocket.pipe(targetSocket).pipe(clientSocket);
+    clientSocket.pipe(targetSocket);
+    targetSocket.pipe(clientSocket);
 
     targetSocket.on('error', (err) => {
-      logger.error('Target socket error', { error: err.message });
-      clientSocket.destroy();
+        logger.error('Target connection error:', err.message);
+        clientSocket.end();
     });
 
-    targetSocket.on('close', () => {
-      logger.debug('Target connection closed');
-      clientSocket.destroy();
+    clientSocket.on('error', (err) => {
+        logger.error('Client connection error:', err.message);
+        targetSocket.end();
     });
   }
 
@@ -231,14 +227,12 @@ export class Socks5Server {
   }
 
   readFromSocket(socket, length) {
-    return new Promise((resolve, reject) => {
-      socket.once('data', (data) => {
-        if (data.length < length) {
-          reject(new Error('Insufficient data received'));
-        } else {
-          resolve(data.slice(0, length));
-        }
-      });
+    return new Promise((resolve) => {
+        const onData = (chunk) => {
+            resolve(chunk);
+            socket.removeListener('data', onData);
+        };
+        socket.on('data', onData);
     });
   }
 
@@ -249,7 +243,7 @@ export class Socks5Server {
 
   async shutdown() {
     this.logger.info('Shutting down SOCKS5 proxy server');
-    
+
     // Close all active connections
     for (const socket of this.connections) {
       socket.destroy();
